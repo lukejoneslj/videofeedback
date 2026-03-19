@@ -9,6 +9,11 @@ import {
   onSnapshot,
   orderBy,
   addDoc,
+  getDoc,
+  getDocs,
+  doc,
+  where,
+  limit,
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -88,12 +93,15 @@ function VideoReviewerContent() {
   const searchParams = useSearchParams();
   
   const [mounted, setMounted] = useState(false);
-  const [videoUrl, setVideoUrl] = useState(searchParams.get("video") || "");
+  const [videoId, setVideoId] = useState<string | null>(searchParams.get("id"));
+  const [videoUrl, setVideoUrl] = useState("");
   const [inputUrl, setInputUrl] = useState("");
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  
+  const [recentVideos, setRecentVideos] = useState<any[]>([]);
 
   // Author
   const [author, setAuthor] = useState<string | null>(null);
@@ -121,27 +129,78 @@ function VideoReviewerContent() {
     }
   }, []);
 
-  // Sync videoUrl setting to the browser URL
+  // Sync videoId setting to the browser URL
   useEffect(() => {
     if (!mounted) return;
     const currentParams = new URLSearchParams(Array.from(searchParams.entries()));
-    if (videoUrl) {
-      if (currentParams.get("video") !== videoUrl) {
-        currentParams.set("video", videoUrl);
+    if (videoId) {
+      if (currentParams.get("id") !== videoId) {
+        currentParams.set("id", videoId);
+        currentParams.delete("video");
         router.push(`/?${currentParams.toString()}`);
       }
     } else {
-      if (currentParams.has("video")) {
+      if (currentParams.has("id") || currentParams.has("video")) {
+        currentParams.delete("id");
         currentParams.delete("video");
         router.push(`/?${currentParams.toString()}`);
       }
     }
-  }, [videoUrl, searchParams, router, mounted]);
+  }, [videoId, searchParams, router, mounted]);
+
+  // Load video URL from Firestore when videoId changes
+  useEffect(() => {
+    if (!videoId) {
+      setVideoUrl("");
+      setComments([]);
+      return;
+    }
+    const fetchVideo = async () => {
+      const snap = await getDoc(doc(db, "videos", videoId));
+      if (snap.exists()) {
+        setVideoUrl(snap.data().url);
+      }
+    };
+    fetchVideo();
+  }, [videoId]);
+
+  // Handle Loading a new video URL
+  const handleLoadVideo = async () => {
+    if (!inputUrl.trim() || !author) return;
+    
+    try {
+      const urlQuery = query(collection(db, "videos"), where("url", "==", inputUrl.trim()), limit(1));
+      const snap = await getDocs(urlQuery);
+      
+      if (!snap.empty) {
+        setVideoId(snap.docs[0].id);
+      } else {
+        const docRef = await addDoc(collection(db, "videos"), {
+          url: inputUrl.trim(),
+          createdAt: serverTimestamp(),
+          author: author,
+        });
+        setVideoId(docRef.id);
+      }
+      setInputUrl("");
+    } catch (e) {
+      console.error("Error loading video", e);
+    }
+  };
+
+  // Subscribe to Recent Videos
+  useEffect(() => {
+    const q = query(collection(db, "videos"), orderBy("createdAt", "desc"), limit(12));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setRecentVideos(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Subscribe to comments
+  // Subscribe to comments
   useEffect(() => {
-    if (!videoUrl) return;
-    const videoId = btoa(videoUrl).slice(0, 20);
+    if (!videoId) return;
 
     const q = query(
       collection(db, `videos/${videoId}/comments`),
@@ -161,10 +220,9 @@ function VideoReviewerContent() {
 
   const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newComment.trim() || !author) return;
+    if (!newComment.trim() || !author || !videoId) return;
 
     const time = currentTime;
-    const videoId = btoa(videoUrl).slice(0, 20);
 
     try {
       await addDoc(collection(db, `videos/${videoId}/comments`), {
@@ -214,7 +272,6 @@ function VideoReviewerContent() {
     : comments.filter((c) => !c.resolved);
 
   const resolvedCount = comments.filter((c) => c.resolved).length;
-  const videoId = videoUrl ? btoa(videoUrl).slice(0, 20) : "";
 
   if (!mounted)
     return (
@@ -263,8 +320,7 @@ function VideoReviewerContent() {
                   onChange={(e) => setInputUrl(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && inputUrl) {
-                      setVideoUrl(inputUrl);
-                      setInputUrl("");
+                      handleLoadVideo();
                     }
                   }}
                   placeholder="Paste Video URL (YouTube, Vimeo, MP4)..."
@@ -273,10 +329,7 @@ function VideoReviewerContent() {
                 <Button
                   size="sm"
                   className="bg-white text-black hover:bg-gray-200 shrink-0"
-                  onClick={() => {
-                    if (inputUrl) setVideoUrl(inputUrl);
-                    setInputUrl("");
-                  }}
+                  onClick={handleLoadVideo}
                 >
                   Load
                 </Button>
@@ -297,26 +350,64 @@ function VideoReviewerContent() {
             {/* Glowing orb */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[400px] bg-primary/5 rounded-full blur-[120px] pointer-events-none" />
 
-            {!videoUrl ? (
-              /* Empty state */
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.6, delay: 0.2 }}
-                className="text-center z-10 max-w-md"
-              >
-                <div className="w-20 h-20 rounded-3xl bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-6 shadow-[0_0_40px_rgba(255,42,109,0.15)]">
-                  <Video className="w-10 h-10 text-primary/60" />
-                </div>
-                <h2 className="font-heading text-2xl font-bold mb-2">
-                  Paste a video link to start
-                </h2>
-                <p className="text-sm text-muted-foreground leading-relaxed">
-                  Drop a YouTube, Vimeo, or direct MP4 URL into the bar above.
-                  <br />
-                  Then leave timestamped feedback, draw annotations, and collaborate with your editor in real time.
-                </p>
-              </motion.div>
+            {!videoId || !videoUrl ? (
+              /* Empty state / Recent Videos */
+              <div className="w-full h-full flex flex-col items-center justify-center p-8 z-10 overflow-y-auto">
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.6, delay: 0.2 }}
+                  className="text-center max-w-md w-full mb-12"
+                >
+                  <div className="w-20 h-20 rounded-3xl bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-6 shadow-[0_0_40px_rgba(255,42,109,0.15)]">
+                    <Video className="w-10 h-10 text-primary/60" />
+                  </div>
+                  <h2 className="font-heading text-2xl font-bold mb-2">
+                    Start a Review Session
+                  </h2>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Paste a YouTube, Vimeo, or MP4 URL in the bar above. Or select a recent session below to continue reviewing.
+                  </p>
+                </motion.div>
+
+                {recentVideos.length > 0 && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 0.4 }}
+                    className="w-full max-w-4xl"
+                  >
+                    <h3 className="text-sm font-semibold tracking-wider text-muted-foreground uppercase mb-4 px-2">Recent Sessions</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {recentVideos.map((video) => (
+                        <button
+                          key={video.id}
+                          onClick={() => setVideoId(video.id)}
+                          className="flex flex-col text-left p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 hover:border-primary/30 transition-all group"
+                        >
+                          <div className="flex items-center gap-3 mb-3">
+                            <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                              <Video className="w-4 h-4 text-primary" />
+                            </div>
+                            <div className="flex-1 truncate">
+                              <p className="text-sm font-medium text-foreground truncate">
+                                {video.url.replace(/^https?:\/\/(www\.)?/, '')}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                Added by <span className="text-white/80">{video.author}</span>
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground/50 mt-auto flex items-center justify-between">
+                            <span>ID: {video.id.slice(0, 8)}</span>
+                            <span className="text-primary opacity-0 group-hover:opacity-100 transition-opacity">Review &rarr;</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </div>
             ) : (
               <motion.div
                 initial={{ scale: 0.95, opacity: 0 }}
@@ -437,7 +528,7 @@ function VideoReviewerContent() {
                     <CommentThread
                       key={comment.id}
                       comment={comment}
-                      videoId={videoId}
+                      videoId={videoId || ""}
                       currentAuthor={author || "Anonymous"}
                       onSeek={seekTo}
                       onViewAnnotation={setViewAnnotation}
