@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import dynamic from "next/dynamic";
+import { useState, useRef, useEffect, useCallback, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   collection,
@@ -35,11 +35,60 @@ import {
 import { CommentThread, type Comment } from "@/components/comment-thread";
 import { AnnotationCanvas } from "@/components/annotation-canvas";
 
-const ReactPlayer = dynamic(() => import("react-player"), { ssr: false });
+import ReactPlayer from "react-player";
 
-export default function VideoReviewer() {
+function VideoPlayer({
+  url,
+  playing,
+  playerRef,
+  onPlay,
+  onPause,
+  onProgress,
+}: {
+  url: string;
+  playing: boolean;
+  playerRef: React.RefObject<any>;
+  onPlay: () => void;
+  onPause: () => void;
+  onProgress: (state: { playedSeconds: number }) => void;
+}) {
+  const [isClient, setIsClient] = useState(false);
+
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  if (!isClient) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-black">
+        <Loader2 className="w-8 h-8 animate-spin text-primary/50" />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <ReactPlayer
+        ref={playerRef}
+        url={url}
+        width="100%"
+        height="100%"
+        controls
+        playing={playing}
+        onPlay={onPlay}
+        onPause={onPause}
+        onProgress={onProgress}
+      />
+    </>
+  );
+}
+
+function VideoReviewerContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  
   const [mounted, setMounted] = useState(false);
-  const [videoUrl, setVideoUrl] = useState("");
+  const [videoUrl, setVideoUrl] = useState(searchParams.get("video") || "");
   const [inputUrl, setInputUrl] = useState("");
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState("");
@@ -71,6 +120,23 @@ export default function VideoReviewer() {
       setShowAuthorPicker(true);
     }
   }, []);
+
+  // Sync videoUrl setting to the browser URL
+  useEffect(() => {
+    if (!mounted) return;
+    const currentParams = new URLSearchParams(Array.from(searchParams.entries()));
+    if (videoUrl) {
+      if (currentParams.get("video") !== videoUrl) {
+        currentParams.set("video", videoUrl);
+        router.push(`/?${currentParams.toString()}`);
+      }
+    } else {
+      if (currentParams.has("video")) {
+        currentParams.delete("video");
+        router.push(`/?${currentParams.toString()}`);
+      }
+    }
+  }, [videoUrl, searchParams, router, mounted]);
 
   // Subscribe to comments
   useEffect(() => {
@@ -138,7 +204,7 @@ export default function VideoReviewer() {
 
   const toggleAnnotationMode = () => {
     if (!annotationMode) {
-      setIsPlaying(false); // Pause when entering annotation mode
+      setIsPlaying(false);
     }
     setAnnotationMode(!annotationMode);
   };
@@ -263,19 +329,13 @@ export default function VideoReviewer() {
                 className="w-full max-w-5xl aspect-video rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.5)] border border-white/5 ring-1 ring-white/10 relative z-10 bg-black group"
                 ref={videoContainerRef}
               >
-                <ReactPlayer
-                  {...({
-                    ref: playerRef,
-                    url: videoUrl,
-                    width: "100%",
-                    height: "100%",
-                    controls: true,
-                    playing: isPlaying,
-                    onPlay: () => setIsPlaying(true),
-                    onPause: () => setIsPlaying(false),
-                    onProgress: (p: any) =>
-                      setCurrentTime(p?.playedSeconds || 0),
-                  } as any)}
+                <VideoPlayer
+                  url={videoUrl}
+                  playing={isPlaying}
+                  playerRef={playerRef}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                  onProgress={(p) => setCurrentTime(p?.playedSeconds || 0)}
                 />
 
                 {/* Annotation canvas overlay */}
@@ -287,7 +347,7 @@ export default function VideoReviewer() {
                   containerRef={videoContainerRef}
                 />
 
-                {/* Annotate button (floating, bottom-right above controls) */}
+                {/* Annotate button (floating, top-right) */}
                 {!annotationMode && (
                   <motion.button
                     initial={{ opacity: 0 }}
@@ -463,5 +523,19 @@ export default function VideoReviewer() {
         </motion.div>
       </div>
     </>
+  );
+}
+
+export default function VideoReviewer() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-background flex items-center justify-center">
+          <Loader2 className="w-8 h-8 animate-spin text-primary/50" />
+        </div>
+      }
+    >
+      <VideoReviewerContent />
+    </Suspense>
   );
 }
