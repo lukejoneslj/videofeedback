@@ -155,36 +155,53 @@ function VideoReviewerContent() {
       setComments([]);
       return;
     }
+    
+    // If videoUrl is already set (e.g. from handleLoadVideo optimistic update), we don't need to fetch
+    if (videoUrl) return;
+
     const fetchVideo = async () => {
-      const snap = await getDoc(doc(db, "videos", videoId));
-      if (snap.exists()) {
-        setVideoUrl(snap.data().url);
+      try {
+        const snap = await getDoc(doc(db, "videos", videoId));
+        if (snap.exists()) {
+          setVideoUrl(snap.data().url);
+        } else {
+          console.error("Video document not found for ID:", videoId);
+        }
+      } catch (err) {
+        console.error("Error fetching video doc:", err);
       }
     };
     fetchVideo();
-  }, [videoId]);
+  }, [videoId, videoUrl]);
 
-  // Handle Loading a new video URL
   const handleLoadVideo = async () => {
-    if (!inputUrl.trim() || !author) return;
+    if (!inputUrl.trim() || !author) {
+      alert("Please enter a URL and make sure you are signed in.");
+      return;
+    }
     
     try {
+      // First, try to find an existing video session
       const urlQuery = query(collection(db, "videos"), where("url", "==", inputUrl.trim()), limit(1));
       const snap = await getDocs(urlQuery);
       
       if (!snap.empty) {
         setVideoId(snap.docs[0].id);
+        setVideoUrl(snap.docs[0].data().url);
       } else {
+        // Create a new session if none exists
         const docRef = await addDoc(collection(db, "videos"), {
           url: inputUrl.trim(),
           createdAt: serverTimestamp(),
           author: author,
         });
         setVideoId(docRef.id);
+        setVideoUrl(inputUrl.trim());
       }
       setInputUrl("");
-    } catch (e) {
-      console.error("Error loading video", e);
+    } catch (e: any) {
+      console.error("Error loading video:", e);
+      alert(`Error loading video: ${e.message}`);
     }
   };
 
@@ -382,7 +399,10 @@ function VideoReviewerContent() {
                       {recentVideos.map((video) => (
                         <button
                           key={video.id}
-                          onClick={() => setVideoId(video.id)}
+                          onClick={() => {
+                            setVideoId(video.id);
+                            setVideoUrl(video.url);
+                          }}
                           className="flex flex-col text-left p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 hover:border-primary/30 transition-all group"
                         >
                           <div className="flex items-center gap-3 mb-3">
