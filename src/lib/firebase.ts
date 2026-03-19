@@ -1,5 +1,5 @@
-import { initializeApp, getApps, getApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
+import { getFirestore, initializeFirestore, Firestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBEyLwxmeh21mIeywl_WJo1M8IRjxHg3KE",
@@ -10,7 +10,16 @@ const firebaseConfig = {
   appId: "1:291919251260:web:265d035a022559923d0039"
 };
 
-const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-const db = getFirestore(app);
+let app: FirebaseApp;
+let db: Firestore;
+
+if (!getApps().length) {
+  app = initializeApp(firebaseConfig);
+  // Force long polling to bypass WebSocket hanging issues in Next.js dev server
+  db = initializeFirestore(app, { experimentalForceLongPolling: true });
+} else {
+  app = getApp();
+  db = getFirestore(app);
+}
 
 export { db };

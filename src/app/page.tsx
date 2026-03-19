@@ -15,6 +15,7 @@ import {
   where,
   limit,
   serverTimestamp,
+  setDoc,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { Button } from "@/components/ui/button";
@@ -86,6 +87,33 @@ function VideoPlayer({
       />
     </>
   );
+}
+
+// Normalize URL to generate deterministic IDs (handles youtu.be, www, query params)
+function getNormalizedVideoId(url: string) {
+  try {
+    const parsed = new URL(url);
+    let host = parsed.hostname.replace(/^www\./, "");
+    let normalized = "";
+
+    if (host === "youtu.be") {
+      normalized = `youtube.com/watch?v=${parsed.pathname.slice(1)}`;
+    } else if (host === "youtube.com") {
+      const v = parsed.searchParams.get("v");
+      normalized = v ? `youtube.com/watch?v=${v}` : `${host}${parsed.pathname}`;
+    } else if (host === "vimeo.com") {
+      normalized = `vimeo.com${parsed.pathname.replace(/\/$/, "")}`;
+    } else {
+      normalized = `${host}${parsed.pathname.replace(/\/$/, "")}`;
+    }
+
+    // Return a stable URL-safe base64 string without padding to prevent Firestore pathing errors
+    return btoa(normalized).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_").slice(0, 25);
+  } catch (e) {
+    // Fallback for invalid URLs or raw strings
+    const fallback = url.trim().replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
+    return btoa(fallback).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_").slice(0, 25);
+  }
 }
 
 function VideoReviewerContent() {
@@ -174,6 +202,18 @@ function VideoReviewerContent() {
     fetchVideo();
   }, [videoId, videoUrl]);
 
+  // Subscribe to Recent Videos
+  useEffect(() => {
+    // Using createdAt so older videos remain visible in the query
+    const q = query(collection(db, "videos"), orderBy("createdAt", "desc"), limit(12));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setRecentVideos(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      console.error("Error fetching recent videos:", error);
+    });
+    return () => unsubscribe();
+  }, []);
+
   const handleLoadVideo = async () => {
     if (!inputUrl.trim() || !author) {
       alert("Please enter a URL and make sure you are signed in.");
@@ -181,38 +221,25 @@ function VideoReviewerContent() {
     }
     
     try {
-      // First, try to find an existing video session
-      const urlQuery = query(collection(db, "videos"), where("url", "==", inputUrl.trim()), limit(1));
-      const snap = await getDocs(urlQuery);
+      const targetUrl = inputUrl.trim();
+      const generatedId = getNormalizedVideoId(targetUrl);
       
-      if (!snap.empty) {
-        setVideoId(snap.docs[0].id);
-        setVideoUrl(snap.docs[0].data().url);
-      } else {
-        // Create a new session if none exists
-        const docRef = await addDoc(collection(db, "videos"), {
-          url: inputUrl.trim(),
-          createdAt: serverTimestamp(),
-          author: author,
-        });
-        setVideoId(docRef.id);
-        setVideoUrl(inputUrl.trim());
-      }
+      // Instantly transition UI
+      setVideoId(generatedId);
+      setVideoUrl(targetUrl);
       setInputUrl("");
+
+      // Background write: create or bump the recent session
+      await setDoc(doc(db, "videos", generatedId), {
+        url: targetUrl,
+        createdAt: serverTimestamp(),
+        author: author,
+      }, { merge: true });
+      
     } catch (e: any) {
-      console.error("Error loading video:", e);
-      alert(`Error loading video: ${e.message}`);
+      console.error("Error setting up video session:", e);
     }
   };
-
-  // Subscribe to Recent Videos
-  useEffect(() => {
-    const q = query(collection(db, "videos"), orderBy("createdAt", "desc"), limit(12));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setRecentVideos(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-    return () => unsubscribe();
-  }, []);
 
   // Subscribe to comments
   // Subscribe to comments
@@ -233,7 +260,7 @@ function VideoReviewerContent() {
     });
 
     return () => unsubscribe();
-  }, [videoUrl]);
+  }, [videoId]);
 
   const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
