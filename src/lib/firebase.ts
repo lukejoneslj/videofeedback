@@ -1,5 +1,5 @@
-import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
-import { getFirestore, initializeFirestore, Firestore } from "firebase/firestore";
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { initializeFirestore, getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBEyLwxmeh21mIeywl_WJo1M8IRjxHg3KE",
@@ -10,16 +10,12 @@ const firebaseConfig = {
   appId: "1:291919251260:web:265d035a022559923d0039"
 };
 
-let app: FirebaseApp;
-let db: Firestore;
+const isNew = !getApps().length;
+const app = isNew ? initializeApp(firebaseConfig) : getApp();
 
-if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
-  // Force long polling to bypass WebSocket hanging issues in Next.js dev server
-  db = initializeFirestore(app, { experimentalForceLongPolling: true });
-} else {
-  app = getApp();
-  db = getFirestore(app);
-}
-
-export { db };
+// Next.js dev server uses WebSockets for HMR on the same port, which silently
+// breaks Firestore's WebSocket transport. Force long polling so Firestore
+// always connects reliably in both dev and production.
+export const db = isNew
+  ? initializeFirestore(app, { experimentalForceLongPolling: true })
+  : getFirestore(app);
