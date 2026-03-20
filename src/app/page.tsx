@@ -10,9 +10,7 @@ import {
   orderBy,
   addDoc,
   getDoc,
-  getDocs,
   doc,
-  where,
   limit,
   serverTimestamp,
   setDoc,
@@ -31,6 +29,9 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  Plus,
+  X,
+  ArrowLeft,
 } from "lucide-react";
 
 import {
@@ -43,6 +44,37 @@ import { AnnotationCanvas } from "@/components/annotation-canvas";
 
 import ReactPlayer from "react-player";
 
+// ─── YouTube Video ID extraction ─────────────────────────────────────────────
+// Handles ALL YouTube URL formats robustly and returns the 11-char video ID.
+// This ID is used directly as the Firestore document ID so any URL format
+// pointing to the same video will always resolve to the same document / comments.
+function extractYouTubeId(url: string): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+
+  // Patterns to try in order:
+  const patterns = [
+    // Standard: youtube.com/watch?v=ID  (also handles &t= etc)
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/|shorts\/|live\/))([\w-]{11})/i,
+    // Short: youtu.be/ID
+    /(?:youtu\.be\/)([\w-]{11})/i,
+    // Already just an 11-char ID  
+    /^([\w-]{11})$/,
+  ];
+
+  for (const pattern of patterns) {
+    const m = trimmed.match(pattern);
+    if (m && m[1]) return m[1];
+  }
+  return null;
+}
+
+// Build a canonical embed-able YouTube URL from a videoId
+function buildYouTubeUrl(videoId: string): string {
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+// ─── Video Player ─────────────────────────────────────────────────────────────
 function VideoPlayer({
   url,
   playing,
@@ -73,63 +105,228 @@ function VideoPlayer({
   }
 
   return (
-    <>
-      <ReactPlayer
-        ref={playerRef}
-        url={url}
-        width="100%"
-        height="100%"
-        controls
-        playing={playing}
-        onPlay={onPlay}
-        onPause={onPause}
-        onProgress={onProgress}
-      />
-    </>
+    <ReactPlayer
+      ref={playerRef}
+      url={url}
+      width="100%"
+      height="100%"
+      controls
+      playing={playing}
+      onPlay={onPlay}
+      onPause={onPause}
+      onProgress={onProgress}
+    />
   );
 }
 
-// Normalize URL to generate deterministic IDs (handles youtu.be, www, query params)
-function getNormalizedVideoId(url: string) {
-  try {
-    const parsed = new URL(url);
-    let host = parsed.hostname.replace(/^www\./, "");
-    let normalized = "";
+// ─── Add Video Modal ──────────────────────────────────────────────────────────
+function AddVideoModal({
+  open,
+  author,
+  onSave,
+  onClose,
+}: {
+  open: boolean;
+  author: string;
+  onSave: (videoId: string, url: string, title: string) => void;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [url, setUrl] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
-    if (host === "youtu.be") {
-      normalized = `youtube.com/watch?v=${parsed.pathname.slice(1)}`;
-    } else if (host === "youtube.com") {
-      const v = parsed.searchParams.get("v");
-      normalized = v ? `youtube.com/watch?v=${v}` : `${host}${parsed.pathname}`;
-    } else if (host === "vimeo.com") {
-      normalized = `vimeo.com${parsed.pathname.replace(/\/$/, "")}`;
-    } else {
-      normalized = `${host}${parsed.pathname.replace(/\/$/, "")}`;
+  // Reset fields when modal opens
+  useEffect(() => {
+    if (open) {
+      setTitle("");
+      setUrl("");
+      setError("");
+      setSaving(false);
     }
+  }, [open]);
 
-    // Return a stable URL-safe base64 string without padding to prevent Firestore pathing errors
-    return btoa(normalized).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_").slice(0, 25);
-  } catch (e) {
-    // Fallback for invalid URLs or raw strings
-    const fallback = url.trim().replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
-    return btoa(fallback).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_").slice(0, 25);
-  }
+  const handleSave = async () => {
+    setError("");
+    if (!title.trim()) {
+      setError("Please enter a title for this video.");
+      return;
+    }
+    const videoId = extractYouTubeId(url.trim());
+    if (!videoId) {
+      setError(
+        "Couldn't find a YouTube video ID in that URL. Make sure you paste a valid YouTube link (youtube.com/watch?v=... or youtu.be/...)."
+      );
+      return;
+    }
+    setSaving(true);
+    try {
+      const canonicalUrl = buildYouTubeUrl(videoId);
+      // setDoc with merge:true → creates doc if missing, never overwrites existing comments
+      await setDoc(
+        doc(db, "videos", videoId),
+        {
+          title: title.trim(),
+          url: canonicalUrl,
+          createdAt: serverTimestamp(),
+          addedBy: author,
+        },
+        { merge: true }
+      );
+      onSave(videoId, canonicalUrl, title.trim());
+    } catch (e: any) {
+      console.error("Error saving video:", e);
+      setError("Something went wrong saving to Firestore. Check the console.");
+      setSaving(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") onClose();
+    if (e.key === "Enter" && !saving) handleSave();
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          {/* Backdrop */}
+          <motion.div
+            key="backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50"
+            onClick={onClose}
+          />
+
+          {/* Modal */}
+          <motion.div
+            key="modal"
+            initial={{ opacity: 0, scale: 0.92, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.92, y: 20 }}
+            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed inset-0 flex items-center justify-center z-50 pointer-events-none px-4"
+          >
+            <div
+              className="pointer-events-auto w-full max-w-md bg-[#0e0e12] border border-white/10 rounded-2xl shadow-[0_30px_80px_rgba(0,0,0,0.7)] overflow-hidden"
+              onKeyDown={handleKeyDown}
+            >
+              {/* Modal header */}
+              <div className="flex items-center justify-between px-6 pt-6 pb-5 border-b border-white/5">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/40 flex items-center justify-center shadow-[0_0_15px_rgba(255,42,109,0.25)]">
+                    <Plus className="w-4 h-4 text-primary" />
+                  </div>
+                  <h2 className="font-heading font-bold text-lg text-foreground">
+                    Add Video
+                  </h2>
+                </div>
+                <button
+                  onClick={onClose}
+                  className="text-muted-foreground hover:text-foreground p-1 rounded-md transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Fields */}
+              <div className="px-6 py-6 space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-muted-foreground tracking-wider uppercase">
+                    Video Title
+                  </label>
+                  <Input
+                    value={title}
+                    onChange={(e) => {
+                      setTitle(e.target.value);
+                      setError("");
+                    }}
+                    placeholder='e.g. "Edit v3 – March rough cut"'
+                    className="bg-black/50 border-white/10 focus-visible:ring-primary h-10 text-sm"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-muted-foreground tracking-wider uppercase">
+                    YouTube Link
+                  </label>
+                  <Input
+                    value={url}
+                    onChange={(e) => {
+                      setUrl(e.target.value);
+                      setError("");
+                    }}
+                    placeholder="youtube.com/watch?v=... or youtu.be/..."
+                    className="bg-black/50 border-white/10 focus-visible:ring-primary h-10 text-sm font-mono"
+                  />
+                  <p className="text-[11px] text-muted-foreground/60">
+                    Any YouTube URL format works — including unlisted links.
+                  </p>
+                </div>
+
+                {error && (
+                  <motion.p
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2"
+                  >
+                    {error}
+                  </motion.p>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-6 flex items-center gap-3 justify-end">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onClose}
+                  className="text-muted-foreground"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={saving || !title.trim() || !url.trim()}
+                  className="bg-primary hover:bg-primary/80 text-white shadow-[0_0_20px_rgba(255,42,109,0.35)] min-w-[80px]"
+                >
+                  {saving ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    "Save"
+                  )}
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
 }
 
+// ─── Main Page Content ────────────────────────────────────────────────────────
 function VideoReviewerContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  
+
   const [mounted, setMounted] = useState(false);
-  const [videoId, setVideoId] = useState<string | null>(searchParams.get("id"));
+  const [videoId, setVideoId] = useState<string | null>(
+    searchParams.get("id")
+  );
   const [videoUrl, setVideoUrl] = useState("");
-  const [inputUrl, setInputUrl] = useState("");
+  const [videoTitle, setVideoTitle] = useState("");
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  
-  const [recentVideos, setRecentVideos] = useState<any[]>([]);
+
+  const [savedVideos, setSavedVideos] = useState<any[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
 
   // Author
   const [author, setAuthor] = useState<string | null>(null);
@@ -137,7 +334,9 @@ function VideoReviewerContent() {
 
   // Annotations
   const [annotationMode, setAnnotationMode] = useState(false);
-  const [pendingAnnotation, setPendingAnnotation] = useState<string | null>(null);
+  const [pendingAnnotation, setPendingAnnotation] = useState<string | null>(
+    null
+  );
   const [viewAnnotation, setViewAnnotation] = useState<string | null>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
 
@@ -146,7 +345,7 @@ function VideoReviewerContent() {
 
   const playerRef = useRef<any>(null);
 
-  // Load author from localStorage on mount
+  // Mount + author load
   useEffect(() => {
     setMounted(true);
     const storedAuthor = getStoredAuthor();
@@ -157,43 +356,45 @@ function VideoReviewerContent() {
     }
   }, []);
 
-  // Sync videoId setting to the browser URL
+  // Sync videoId → browser URL
   useEffect(() => {
     if (!mounted) return;
-    const currentParams = new URLSearchParams(Array.from(searchParams.entries()));
+    const currentParams = new URLSearchParams(
+      Array.from(searchParams.entries())
+    );
     if (videoId) {
       if (currentParams.get("id") !== videoId) {
         currentParams.set("id", videoId);
-        currentParams.delete("video");
         router.push(`/?${currentParams.toString()}`);
       }
     } else {
-      if (currentParams.has("id") || currentParams.has("video")) {
+      if (currentParams.has("id")) {
         currentParams.delete("id");
-        currentParams.delete("video");
         router.push(`/?${currentParams.toString()}`);
       }
     }
   }, [videoId, searchParams, router, mounted]);
 
-  // Load video URL from Firestore when videoId changes
+  // When videoId changes but videoUrl isn't set yet (e.g. loaded from URL param), fetch from Firestore
   useEffect(() => {
     if (!videoId) {
       setVideoUrl("");
+      setVideoTitle("");
       setComments([]);
       return;
     }
-    
-    // If videoUrl is already set (e.g. from handleLoadVideo optimistic update), we don't need to fetch
-    if (videoUrl) return;
+    if (videoUrl) return; // already set optimistically
 
     const fetchVideo = async () => {
       try {
         const snap = await getDoc(doc(db, "videos", videoId));
         if (snap.exists()) {
-          setVideoUrl(snap.data().url);
+          const data = snap.data();
+          setVideoUrl(data.url || buildYouTubeUrl(videoId));
+          setVideoTitle(data.title || "");
         } else {
-          console.error("Video document not found for ID:", videoId);
+          // Fallback: build a watchable URL from the ID alone
+          setVideoUrl(buildYouTubeUrl(videoId));
         }
       } catch (err) {
         console.error("Error fetching video doc:", err);
@@ -202,72 +403,59 @@ function VideoReviewerContent() {
     fetchVideo();
   }, [videoId, videoUrl]);
 
-  // Subscribe to Recent Videos
+  // Subscribe to saved videos dashboard
   useEffect(() => {
-    // Using createdAt so older videos remain visible in the query
-    const q = query(collection(db, "videos"), orderBy("createdAt", "desc"), limit(12));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setRecentVideos(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, (error) => {
-      console.error("Error fetching recent videos:", error);
-    });
-    return () => unsubscribe();
+    const q = query(
+      collection(db, "videos"),
+      orderBy("createdAt", "desc"),
+      limit(20)
+    );
+    const unsub = onSnapshot(
+      q,
+      (snapshot) => {
+        setSavedVideos(
+          snapshot.docs.map((d) => ({ id: d.id, ...d.data() }))
+        );
+      },
+      (error) => {
+        console.error("Error fetching saved videos:", error);
+      }
+    );
+    return () => unsub();
   }, []);
 
-  const handleLoadVideo = async () => {
-    if (!inputUrl.trim() || !author) {
-      alert("Please enter a URL and make sure you are signed in.");
-      return;
-    }
-    
-    try {
-      const targetUrl = inputUrl.trim();
-      const generatedId = getNormalizedVideoId(targetUrl);
-      
-      // Instantly transition UI
-      setVideoId(generatedId);
-      setVideoUrl(targetUrl);
-      setInputUrl("");
-
-      // Background write: create or bump the recent session
-      await setDoc(doc(db, "videos", generatedId), {
-        url: targetUrl,
-        createdAt: serverTimestamp(),
-        author: author,
-      }, { merge: true });
-      
-    } catch (e: any) {
-      console.error("Error setting up video session:", e);
-    }
-  };
-
-  // Subscribe to comments
-  // Subscribe to comments
+  // Subscribe to comments for current video
   useEffect(() => {
     if (!videoId) return;
-
     const q = query(
       collection(db, `videos/${videoId}/comments`),
       orderBy("timestamp", "asc")
     );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetched = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...d.data(),
-      })) as Comment[];
-      setComments(fetched);
+    const unsub = onSnapshot(q, (snapshot) => {
+      setComments(
+        snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Comment))
+      );
     });
-
-    return () => unsubscribe();
+    return () => unsub();
   }, [videoId]);
+
+  // Called after AddVideoModal saves to Firestore
+  const handleVideoSaved = (
+    ytId: string,
+    url: string,
+    title: string
+  ) => {
+    setVideoId(ytId);
+    setVideoUrl(url);
+    setVideoTitle(title);
+    setShowAddModal(false);
+  };
 
   const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newComment.trim() || !author || !videoId) return;
 
     const time = currentTime;
-
     try {
       await addDoc(collection(db, `videos/${videoId}/comments`), {
         text: newComment,
@@ -305,9 +493,7 @@ function VideoReviewerContent() {
   };
 
   const toggleAnnotationMode = () => {
-    if (!annotationMode) {
-      setIsPlaying(false);
-    }
+    if (!annotationMode) setIsPlaying(false);
     setAnnotationMode(!annotationMode);
   };
 
@@ -336,17 +522,39 @@ function VideoReviewerContent() {
         }}
       />
 
+      {/* Add Video Modal */}
+      <AddVideoModal
+        open={showAddModal}
+        author={author || ""}
+        onSave={handleVideoSaved}
+        onClose={() => setShowAddModal(false)}
+      />
+
       <div className="min-h-screen flex flex-col md:flex-row bg-background overflow-hidden font-sans">
-        {/* LEFT: Video Area */}
+        {/* ── LEFT: Video Area ─────────────────────────────────────────── */}
         <div className="flex-1 flex flex-col relative">
-          {/* Header bar */}
+          {/* Header */}
           <motion.div
             initial={{ y: -50, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
-            className="h-16 border-b border-border/40 flex items-center px-6 justify-between bg-card/30 backdrop-blur-xl z-10"
+            className="h-16 border-b border-border/40 flex items-center px-6 justify-between bg-card/30 backdrop-blur-xl z-10 gap-4"
           >
+            {/* Logo + back-to-dashboard */}
             <div className="flex items-center gap-3">
+              {videoId && (
+                <button
+                  onClick={() => {
+                    setVideoId(null);
+                    setVideoUrl("");
+                    setVideoTitle("");
+                  }}
+                  className="text-muted-foreground hover:text-foreground transition-colors p-1 rounded-md"
+                  title="Back to dashboard"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
+              )}
               <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center border border-primary/50 shadow-[0_0_15px_rgba(255,42,109,0.3)]">
                 <Video className="w-4 h-4 text-primary" />
               </div>
@@ -354,30 +562,23 @@ function VideoReviewerContent() {
                 NEON{" "}
                 <span className="text-primary font-bold">REVIEWER</span>
               </h1>
+              {videoTitle && (
+                <span className="hidden sm:block text-sm text-muted-foreground truncate max-w-[260px]">
+                  — {videoTitle}
+                </span>
+              )}
             </div>
 
-            <div className="flex items-center gap-4">
-              {/* URL input */}
-              <div className="flex items-center gap-2 max-w-md w-full">
-                <Input
-                  value={inputUrl}
-                  onChange={(e) => setInputUrl(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && inputUrl) {
-                      handleLoadVideo();
-                    }
-                  }}
-                  placeholder="Paste Video URL (YouTube, Vimeo, MP4)..."
-                  className="bg-black/50 border-white/10 focus-visible:ring-primary h-9 font-mono text-xs"
-                />
-                <Button
-                  size="sm"
-                  className="bg-white text-black hover:bg-gray-200 shrink-0"
-                  onClick={handleLoadVideo}
-                >
-                  Load
-                </Button>
-              </div>
+            <div className="flex items-center gap-3">
+              {/* + Add Video button */}
+              <Button
+                size="sm"
+                onClick={() => setShowAddModal(true)}
+                className="bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 hover:border-primary/60 transition-all gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                Add Video
+              </Button>
 
               {/* Author badge */}
               {author && (
@@ -389,73 +590,109 @@ function VideoReviewerContent() {
             </div>
           </motion.div>
 
-          {/* Video Player Wrapper */}
+          {/* Video / Dashboard area */}
           <div className="flex-1 flex items-center justify-center p-6 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-secondary/40 via-background to-background relative">
-            {/* Glowing orb */}
+            {/* Glow orb */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[400px] bg-primary/5 rounded-full blur-[120px] pointer-events-none" />
 
             {!videoId || !videoUrl ? (
-              /* Empty state / Recent Videos */
+              /* ── Dashboard ── */
               <div className="w-full h-full flex flex-col items-center justify-center p-8 z-10 overflow-y-auto">
                 <motion.div
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.6, delay: 0.2 }}
-                  className="text-center max-w-md w-full mb-12"
+                  className="text-center max-w-md w-full mb-10"
                 >
                   <div className="w-20 h-20 rounded-3xl bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-6 shadow-[0_0_40px_rgba(255,42,109,0.15)]">
                     <Video className="w-10 h-10 text-primary/60" />
                   </div>
                   <h2 className="font-heading text-2xl font-bold mb-2">
-                    Start a Review Session
+                    Video Review Dashboard
                   </h2>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    Paste a YouTube, Vimeo, or MP4 URL in the bar above. Or select a recent session below to continue reviewing.
+                  <p className="text-sm text-muted-foreground leading-relaxed mb-6">
+                    Add a video to start a review session. All comments sync
+                    in real-time across every reviewer.
                   </p>
+                  <Button
+                    onClick={() => setShowAddModal(true)}
+                    className="bg-primary hover:bg-primary/80 text-white shadow-[0_0_25px_rgba(255,42,109,0.4)] gap-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Video
+                  </Button>
                 </motion.div>
 
-                {recentVideos.length > 0 && (
-                  <motion.div 
+                {/* Saved videos grid */}
+                {savedVideos.length > 0 && (
+                  <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ delay: 0.4 }}
                     className="w-full max-w-4xl"
                   >
-                    <h3 className="text-sm font-semibold tracking-wider text-muted-foreground uppercase mb-4 px-2">Recent Sessions</h3>
+                    <h3 className="text-xs font-semibold tracking-widest text-muted-foreground uppercase mb-4 px-1">
+                      Saved Videos
+                    </h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {recentVideos.map((video) => (
-                        <button
-                          key={video.id}
-                          onClick={() => {
-                            setVideoId(video.id);
-                            setVideoUrl(video.url);
-                          }}
-                          className="flex flex-col text-left p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 hover:border-primary/30 transition-all group"
-                        >
-                          <div className="flex items-center gap-3 mb-3">
-                            <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-                              <Video className="w-4 h-4 text-primary" />
+                      {savedVideos.map((video) => {
+                        const displayTitle =
+                          video.title ||
+                          video.url?.replace(
+                            /^https?:\/\/(www\.)?youtube\.com\/watch\?v=/,
+                            ""
+                          ) ||
+                          video.id;
+                        return (
+                          <motion.button
+                            key={video.id}
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => {
+                              setVideoId(video.id);
+                              setVideoUrl(
+                                video.url || buildYouTubeUrl(video.id)
+                              );
+                              setVideoTitle(video.title || "");
+                            }}
+                            className="flex flex-col text-left p-5 rounded-xl border border-white/5 bg-white/[0.03] hover:bg-white/[0.07] hover:border-primary/30 transition-all group"
+                          >
+                            {/* Thumbnail placeholder */}
+                            <div className="w-full aspect-video rounded-lg bg-black/60 mb-4 overflow-hidden border border-white/5 relative flex items-center justify-center">
+                              <img
+                                src={`https://img.youtube.com/vi/${video.id}/mqdefault.jpg`}
+                                alt={displayTitle}
+                                className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).style.display =
+                                    "none";
+                                }}
+                              />
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="w-10 h-10 rounded-full bg-primary/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg">
+                                  <Video className="w-5 h-5 text-white ml-0.5" />
+                                </div>
+                              </div>
                             </div>
-                            <div className="flex-1 truncate">
-                              <p className="text-sm font-medium text-foreground truncate">
-                                {video.url.replace(/^https?:\/\/(www\.)?/, '')}
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                Added by <span className="text-white/80">{video.author}</span>
-                              </p>
-                            </div>
-                          </div>
-                          <div className="text-xs text-muted-foreground/50 mt-auto flex items-center justify-between">
-                            <span>ID: {video.id.slice(0, 8)}</span>
-                            <span className="text-primary opacity-0 group-hover:opacity-100 transition-opacity">Review &rarr;</span>
-                          </div>
-                        </button>
-                      ))}
+
+                            <p className="text-sm font-semibold text-foreground truncate mb-1">
+                              {displayTitle}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Added by{" "}
+                              <span className="text-white/70">
+                                {video.addedBy || video.author || "—"}
+                              </span>
+                            </p>
+                          </motion.button>
+                        );
+                      })}
                     </div>
                   </motion.div>
                 )}
               </div>
             ) : (
+              /* ── Video Player ── */
               <motion.div
                 initial={{ scale: 0.95, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
@@ -473,7 +710,9 @@ function VideoReviewerContent() {
                   playerRef={playerRef}
                   onPlay={() => setIsPlaying(true)}
                   onPause={() => setIsPlaying(false)}
-                  onProgress={(p) => setCurrentTime(p?.playedSeconds || 0)}
+                  onProgress={(p) =>
+                    setCurrentTime(p?.playedSeconds || 0)
+                  }
                 />
 
                 {/* Annotation canvas overlay */}
@@ -485,7 +724,7 @@ function VideoReviewerContent() {
                   containerRef={videoContainerRef}
                 />
 
-                {/* Annotate button (floating, top-right) */}
+                {/* Annotate button */}
                 {!annotationMode && (
                   <motion.button
                     initial={{ opacity: 0 }}
@@ -503,7 +742,7 @@ function VideoReviewerContent() {
           </div>
         </div>
 
-        {/* RIGHT: Comment Sidebar */}
+        {/* ── RIGHT: Comment Sidebar ────────────────────────────────────── */}
         <motion.div
           initial={{ x: 100, opacity: 0 }}
           animate={{ x: 0, opacity: 1 }}
@@ -513,7 +752,7 @@ function VideoReviewerContent() {
           {/* Sidebar header */}
           <div className="p-5 border-b border-white/10 flex items-center justify-between bg-black/20">
             <h2 className="font-heading font-semibold text-lg flex items-center gap-2">
-              Feedback & Notes
+              Feedback &amp; Notes
               <span className="bg-primary/20 text-primary text-xs px-2 py-0.5 rounded-full font-mono border border-primary/30">
                 {comments.length}
               </span>
@@ -525,7 +764,6 @@ function VideoReviewerContent() {
               )}
             </h2>
 
-            {/* Toggle resolved visibility */}
             {resolvedCount > 0 && (
               <button
                 onClick={() => setShowResolved(!showResolved)}
@@ -555,7 +793,7 @@ function VideoReviewerContent() {
                     <div className="w-12 h-12 rounded-full border border-white/5 border-dashed flex items-center justify-center">
                       <Video className="w-5 h-5 text-muted-foreground/50" />
                     </div>
-                    Load a video to start reviewing
+                    Select a video to start reviewing
                   </motion.div>
                 ) : filteredComments.length === 0 ? (
                   <motion.div
@@ -664,6 +902,7 @@ function VideoReviewerContent() {
   );
 }
 
+// ─── Root export ──────────────────────────────────────────────────────────────
 export default function VideoReviewer() {
   return (
     <Suspense
